@@ -1,0 +1,40 @@
+---
+- name: Build target list from the IPs typed in the form
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Add each IP as a patch target
+      ansible.builtin.add_host:
+        name: "{{ item }}"
+        groups: patch_targets
+        ansible_connection: winrm
+        ansible_winrm_transport: basic
+        ansible_winrm_server_cert_validation: ignore
+        ansible_port: 5985
+      loop: "{{ target_ips.split(',') | map('trim') | select | list }}"
+
+- name: Patch Windows servers
+  hosts: patch_targets
+  gather_facts: no
+  tasks:
+    - name: Install all available updates
+      ansible.windows.win_updates:
+        category_names:
+          - SecurityUpdates
+          - CriticalUpdates
+          - UpdateRollups
+      register: update_result
+      ignore_errors: yes
+
+    - name: Reboot if updates require it
+      ansible.windows.win_reboot:
+      when: update_result.reboot_required
+
+    - name: Second pass to catch anything left
+      ansible.windows.win_updates:
+        category_names:
+          - SecurityUpdates
+          - CriticalUpdates
+          - UpdateRollups
+      register: second_pass
+      ignore_errors: yes
