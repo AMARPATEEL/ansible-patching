@@ -1,40 +1,95 @@
 ---
-- name: Build target list from the IPs typed in the form
+- name: Build target lists from the form
   hosts: localhost
   gather_facts: no
   tasks:
-    - name: Add each IP as a patch target
+    - name: Add Windows targets
       ansible.builtin.add_host:
         name: "{{ item }}"
-        groups: patch_targets
+        groups: windows_targets
         ansible_connection: winrm
         ansible_winrm_transport: basic
         ansible_winrm_server_cert_validation: ignore
         ansible_port: 5985
-      loop: "{{ target_ips.split(',') | map('trim') | select | list }}"
+      loop: "{{ (windows_ips | default('')).split(',') | map('trim') | select | list }}"
+
+    - name: Add Linux targets
+      ansible.builtin.add_host:
+        name: "{{ item }}"
+        groups: linux_targets
+        ansible_connection: ssh
+        ansible_port: 22
+        ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
+      loop: "{{ (linux_ips | default('')).split(',') | map('trim') | select | list }}"
 
 - name: Patch Windows servers
-  hosts: patch_targets
+  hosts: windows_targets
   gather_facts: no
   tasks:
     - name: Install all available updates
       ansible.windows.win_updates:
-        category_names:
-          - SecurityUpdates
-          - CriticalUpdates
-          - UpdateRollups
+        category_names: [SecurityUpdates, CriticalUpdates, UpdateRollups]
       register: update_result
       ignore_errors: yes
-
-    - name: Reboot if updates require it
+    - name: Reboot if required
       ansible.windows.win_reboot:
       when: update_result.reboot_required
-
-    - name: Second pass to catch anything left
+    - name: Second pass
       ansible.windows.win_updates:
-        category_names:
-          - SecurityUpdates
-          - CriticalUpdates
-          - UpdateRollups
-      register: second_pass
+        category_names: [SecurityUpdates, CriticalUpdates, UpdateRollups]
       ignore_errors: yes
+
+- name: Patch Linux servers
+  hosts: linux_targets
+  become: yes
+  gather_facts: yes
+  tasks:
+    - name: Patch Debian/Ubuntu
+      ansible.builtin.apt:
+        update_cache: yes
+        upgrade: dist
+      when: ansible_os_family == "Debian"
+      ignore_errors: yes
+
+    - name: Patch RHEL/Amazon Linux
+      ansible.builtin.yum:
+        name: "*"
+        state: latest
+      when: ansible_os_family == "RedHat"
+      ignore_errors: yes
+
+    - name: Patch SUSE
+      community.general.zypper:
+        name: "*"
+        state: latest
+        update_cache: yes
+      when: ansible_os_family == "Suse"
+      ignore_errors: yes
+
+    - name: Check Debian reboot flag
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: debian_reboot
+      when: ansible_os_family == "Debian"
+
+    - name: Check RHEL/Amazon Linux reboot need
+      ansible.builtin.command: needs-restarting -r
+      register: rhel_reboot
+      changed_when: false
+      failed_when: false
+      when: ansible_os_family == "RedHat"
+
+    - name: Check SUSE reboot need
+      ansible.builtin.command: zypper ps -s
+      register: suse_reboot
+      changed_when: false
+      failed_when: false
+      when: ansible_os_family == "Suse"
+
+    - name: Reboot if needed
+      ansible.builtin.reboot:
+        reboot_timeout: 600
+      when: >
+        (ansible_os_family == "Debian" and debian_reboot.stat.exists) or
+        (ansible_os_family == "RedHat" and rhel_reboot.rc == 1) or
+        (ansible_os_family == "Suse" and suse_reboot.stdout != "")
