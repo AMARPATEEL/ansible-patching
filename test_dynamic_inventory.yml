@@ -1,0 +1,7 @@
+---
+- name: Test dynamic inventory discovery
+  hosts: all
+  gather_facts: no
+  tasks:
+    - name: Ping each discovered host
+      ansible.builtin.ping:
