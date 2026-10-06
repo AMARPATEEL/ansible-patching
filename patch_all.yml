@@ -13,17 +13,18 @@
         ansible_port: 5985
       loop: "{{ (windows_ips | default('')).split(',') | map('trim') | select | list }}"
 
-    - name: Work out which Linux OS groups to target this run
+    - name: Work out which discovered Linux hosts match the requested IPs
       ansible.builtin.set_fact:
-        linux_host_pattern: >-
-          {%- if not (patch_linux | default(false) | bool) -%}
-            no_hosts_selected
-          {%- else -%}
-            {%- set all_groups = ['ubuntu','debian','amazonlinux','rhel','suse'] -%}
-            {%- set chosen = (linux_os_filter | default('')).split(',') | map('trim') | select | list -%}
-            {%- set use = chosen if chosen | length > 0 else all_groups -%}
-            {{ use | map('regex_replace', '^(.*)$', 'tag_OSFamily_\1') | join(':') }}
-          {%- endif -%}
+        requested_linux_ips: "{{ (linux_ips | default('')).split(',') | map('trim') | select | list }}"
+        all_discovered_linux: "{{ groups['tag_OSFamily_ubuntu'] | default([]) + groups['tag_OSFamily_debian'] | default([]) + groups['tag_OSFamily_amazonlinux'] | default([]) + groups['tag_OSFamily_rhel'] | default([]) + groups['tag_OSFamily_suse'] | default([]) }}"
+
+    - name: Compute final selected Linux hosts (intersection)
+      ansible.builtin.set_fact:
+        selected_linux_hosts: "{{ all_discovered_linux | intersect(requested_linux_ips) }}"
+
+    - name: Show what will actually be patched (for your visibility in the log)
+      ansible.builtin.debug:
+        msg: "Linux servers selected for patching: {{ selected_linux_hosts }}"
 
 - name: Patch Windows servers
   hosts: windows_targets
@@ -42,14 +43,13 @@
         category_names: [SecurityUpdates, CriticalUpdates, UpdateRollups]
       ignore_errors: yes
 
-- name: Patch Linux servers (AWS, discovered by tag)
-  hosts: "{{ hostvars['localhost']['linux_host_pattern'] }}"
+- name: Patch only the explicitly selected Linux servers
+  hosts: "{{ hostvars['localhost']['selected_linux_hosts'] }}"
   become: yes
   gather_facts: yes
   tasks:
     - name: Check if swapfile already exists
-      ansible.builtin.stat:
-        path: /swapfile
+      ansible.builtin.stat: {path: /swapfile}
       register: swapfile_stat
 
     - name: Set up 1G swap file if missing
