@@ -1,5 +1,5 @@
 ---
-- name: Build target lists from the form
+- name: Build Windows target list from the form
   hosts: localhost
   gather_facts: no
   tasks:
@@ -13,15 +13,6 @@
         ansible_port: 5985
       loop: "{{ (windows_ips | default('')).split(',') | map('trim') | select | list }}"
 
-    - name: Add Linux targets
-      ansible.builtin.add_host:
-        name: "{{ item }}"
-        groups: linux_targets
-        ansible_connection: ssh
-        ansible_port: 22
-        ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
-      loop: "{{ (linux_ips | default('')).split(',') | map('trim') | select | list }}"
-
 - name: Patch Windows servers
   hosts: windows_targets
   gather_facts: no
@@ -31,19 +22,49 @@
         category_names: [SecurityUpdates, CriticalUpdates, UpdateRollups]
       register: update_result
       ignore_errors: yes
+
     - name: Reboot if required
       ansible.windows.win_reboot:
       when: update_result.reboot_required
-    - name: Second pass
+
+    - name: Second pass to catch anything left
       ansible.windows.win_updates:
         category_names: [SecurityUpdates, CriticalUpdates, UpdateRollups]
       ignore_errors: yes
 
-- name: Patch Linux servers
-  hosts: linux_targets
+- name: Patch Linux servers (AWS, discovered by tag)
+  hosts: tag_OSFamily_ubuntu:tag_OSFamily_debian:tag_OSFamily_amazonlinux:tag_OSFamily_rhel:tag_OSFamily_suse
   become: yes
   gather_facts: yes
   tasks:
+    - name: Check if swapfile already exists
+      ansible.builtin.stat:
+        path: /swapfile
+      register: swapfile_stat
+
+    - name: Set up 1G swap file if missing
+      when: not swapfile_stat.stat.exists
+      block:
+        - name: Create swap file
+          ansible.builtin.command: fallocate -l 1G /swapfile
+
+        - name: Set swapfile permissions
+          ansible.builtin.file:
+            path: /swapfile
+            mode: '0600'
+
+        - name: Format swapfile
+          ansible.builtin.command: mkswap /swapfile
+
+        - name: Enable swapfile
+          ansible.builtin.command: swapon /swapfile
+
+        - name: Persist swapfile in fstab
+          ansible.builtin.lineinfile:
+            path: /etc/fstab
+            line: '/swapfile none swap sw 0 0'
+            state: present
+
     - name: Patch Debian/Ubuntu
       ansible.builtin.apt:
         update_cache: yes
@@ -90,6 +111,6 @@
       ansible.builtin.reboot:
         reboot_timeout: 600
       when: >
-        (ansible_os_family == "Debian" and debian_reboot.stat.exists) or
-        (ansible_os_family == "RedHat" and rhel_reboot.rc == 1) or
-        (ansible_os_family == "Suse" and suse_reboot.stdout != "")
+        (ansible_os_family == "Debian" and debian_reboot.stat is defined and debian_reboot.stat.exists) or
+        (ansible_os_family == "RedHat" and rhel_reboot.rc is defined and rhel_reboot.rc == 1) or
+        (ansible_os_family == "Suse" and suse_reboot.stdout is defined and suse_reboot.stdout != "")
