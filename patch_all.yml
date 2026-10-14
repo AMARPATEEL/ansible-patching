@@ -22,9 +22,18 @@
       ansible.builtin.set_fact:
         selected_linux_hosts: "{{ all_discovered_linux | intersect(requested_linux_ips) }}"
 
-    - name: Show what will actually be patched (for your visibility in the log)
+    - name: Show requested vs discovered vs selected
       ansible.builtin.debug:
-        msg: "Linux servers selected for patching: {{ selected_linux_hosts }}"
+        msg:
+          - "You asked for:  {{ requested_linux_ips }}"
+          - "AWS discovered: {{ all_discovered_linux }}"
+          - "Will patch:     {{ selected_linux_hosts }}"
+
+    - name: Stop if any requested Linux IP was not found
+      ansible.builtin.assert:
+        that: (requested_linux_ips | difference(all_discovered_linux)) | length == 0
+        fail_msg: "Not found among running, tagged servers: {{ requested_linux_ips | difference(all_discovered_linux) }}"
+        success_msg: "All requested Linux IPs were found"
 
 - name: Patch Windows servers
   hosts: windows_targets
